@@ -2,12 +2,18 @@
 
 import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { Reorder, useDragControls, motion, AnimatePresence } from 'framer-motion';
+import { db } from '@/lib/instant';
+import { id } from '@instantdb/react';
+import Auth from './components/Auth';
 
 interface Task {
   id: string;
   title: string;
   isCompleted: boolean;
   sortOrder: number;
+  createdAt?: number;
+  updatedAt?: number;
+  userId?: string;
 }
 
 type Action =
@@ -17,15 +23,25 @@ type Action =
   | { type: 'UPDATE_TASK'; taskId: string; oldTitle: string; newTitle: string };
 
 export default function Home() {
-  const [tasks, setTasks] = useState<Task[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [undoStack, setUndoStack] = useState<Action[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Check authentication status
+  const { isLoading: authLoading, user, error: authError } = db.useAuth();
+
+  // Query tasks from InstantDB (scoped to authenticated user)
+  const { isLoading, error, data } = db.useQuery({ tasks: {} });
+  const tasks = (data?.tasks || []) as Task[];
+
   // Separate active and completed tasks
-  const activeTasks = tasks.filter(t => !t.isCompleted);
-  const completedTasks = tasks.filter(t => t.isCompleted);
+  const activeTasks = tasks
+    .filter(t => !t.isCompleted)
+    .sort((a, b) => a.sortOrder - b.sortOrder);
+  const completedTasks = tasks
+    .filter(t => t.isCompleted)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
   // Undo function
   const undo = () => {
@@ -37,27 +53,36 @@ export default function Home() {
 
     switch (lastAction.type) {
       case 'ADD_TASK':
-        setTasks(tasks.filter(t => t.id !== lastAction.task.id));
+        db.transact(db.tx.tasks[lastAction.task.id].delete());
         break;
       case 'DELETE_TASK':
-        const updatedTasks = [...tasks];
-        updatedTasks.splice(lastAction.index, 0, lastAction.task);
-        setTasks(updatedTasks);
+        db.transact(
+          db.tx.tasks[lastAction.task.id].update({
+            ...lastAction.task,
+            updatedAt: Date.now(),
+          })
+        );
         break;
       case 'TOGGLE_COMPLETE':
-        setTasks(tasks.map(t =>
-          t.id === lastAction.taskId ? { ...t, isCompleted: lastAction.wasCompleted } : t
-        ));
+        db.transact(
+          db.tx.tasks[lastAction.taskId].update({
+            isCompleted: lastAction.wasCompleted,
+            updatedAt: Date.now(),
+          })
+        );
         break;
       case 'UPDATE_TASK':
-        setTasks(tasks.map(t =>
-          t.id === lastAction.taskId ? { ...t, title: lastAction.oldTitle } : t
-        ));
+        db.transact(
+          db.tx.tasks[lastAction.taskId].update({
+            title: lastAction.oldTitle,
+            updatedAt: Date.now(),
+          })
+        );
         break;
     }
   };
 
-  // Listen for Cmd+Z
+  // Listen for Cmd+Z - MUST be called before any conditional returns
   useEffect(() => {
     const handleKeyDown = (e: globalThis.KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
@@ -70,63 +95,89 @@ export default function Home() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [undoStack, tasks]);
 
+  // Show auth screen if not authenticated
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-800 flex items-center justify-center">
+        <div className="text-2xl text-slate-600 dark:text-slate-400">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Auth />;
+  }
+
   // Add new task
   const addTask = () => {
     if (newTaskTitle.trim()) {
+      const taskId = id();
+      const now = Date.now();
       const newTask: Task = {
-        id: Date.now().toString(),
+        id: taskId,
         title: newTaskTitle,
         isCompleted: false,
         sortOrder: tasks.length,
+        createdAt: now,
+        updatedAt: now,
       };
-      setTasks([...tasks, newTask]);
+
+      db.transact(db.tx.tasks[taskId].update(newTask));
       setUndoStack([...undoStack, { type: 'ADD_TASK', task: newTask }]);
       setNewTaskTitle('');
     }
   };
 
   // Complete/uncomplete task
-  const toggleComplete = (id: string) => {
-    const task = tasks.find(t => t.id === id);
+  const toggleComplete = (taskId: string) => {
+    const task = tasks.find(t => t.id === taskId);
     if (!task) return;
 
     setUndoStack([...undoStack, {
       type: 'TOGGLE_COMPLETE',
-      taskId: id,
+      taskId,
       wasCompleted: task.isCompleted
     }]);
-    setTasks(tasks.map(task =>
-      task.id === id ? { ...task, isCompleted: !task.isCompleted } : task
-    ));
+
+    db.transact(
+      db.tx.tasks[taskId].update({
+        isCompleted: !task.isCompleted,
+        updatedAt: Date.now(),
+      })
+    );
   };
 
   // Delete task
-  const deleteTask = (id: string) => {
-    const taskIndex = tasks.findIndex(t => t.id === id);
+  const deleteTask = (taskId: string) => {
+    const taskIndex = tasks.findIndex(t => t.id === taskId);
     const task = tasks[taskIndex];
     if (!task) return;
 
     setUndoStack([...undoStack, { type: 'DELETE_TASK', task, index: taskIndex }]);
-    setTasks(tasks.filter(task => task.id !== id));
+    db.transact(db.tx.tasks[taskId].delete());
   };
 
   // Update task title
-  const updateTaskTitle = (id: string, newTitle: string) => {
-    const task = tasks.find(t => t.id === id);
+  const updateTaskTitle = (taskId: string, newTitle: string) => {
+    const task = tasks.find(t => t.id === taskId);
     if (!task) return;
 
     if (newTitle.trim() && newTitle !== task.title) {
       setUndoStack([...undoStack, {
         type: 'UPDATE_TASK',
-        taskId: id,
+        taskId,
         oldTitle: task.title,
         newTitle
       }]);
-      setTasks(tasks.map(task =>
-        task.id === id ? { ...task, title: newTitle } : task
-      ));
+
+      db.transact(
+        db.tx.tasks[taskId].update({
+          title: newTitle,
+          updatedAt: Date.now(),
+        })
+      );
     } else if (!newTitle.trim()) {
-      deleteTask(id);
+      deleteTask(taskId);
     }
     setEditingId(null);
   };
@@ -150,24 +201,57 @@ export default function Home() {
 
   // Handle reordering
   const handleReorder = (newOrder: Task[]) => {
-    const updatedTasks = newOrder.map((task, index) => ({
-      ...task,
-      sortOrder: index,
-    }));
-    setTasks([...updatedTasks, ...completedTasks]);
+    const updates = newOrder.map((task, index) =>
+      db.tx.tasks[task.id].update({
+        sortOrder: index,
+        updatedAt: Date.now(),
+      })
+    );
+    db.transact(updates);
   };
+
+  // Loading state
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-800 flex items-center justify-center">
+        <div className="text-2xl text-slate-600 dark:text-slate-400">Loading...</div>
+      </div>
+    );
+  }
+
+  // Error state
+  if (error) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-800 flex items-center justify-center">
+        <div className="text-2xl text-red-600">Error loading tasks</div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-800 p-4 md:p-8">
       <div className="max-w-2xl mx-auto">
         {/* Header */}
         <div className="mb-8">
-          <h1 className="text-5xl md:text-6xl font-bold text-slate-900 dark:text-white mb-2">
-            Today
-          </h1>
+          <div className="flex items-center justify-between mb-2">
+            <h1 className="text-5xl md:text-6xl font-bold text-slate-900 dark:text-white">
+              Today
+            </h1>
+            <button
+              onClick={() => db.auth.signOut()}
+              className="px-4 py-2 text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors rounded-lg hover:bg-slate-200/50 dark:hover:bg-slate-700/50"
+            >
+              Sign Out
+            </button>
+          </div>
           <p className="text-slate-600 dark:text-slate-400 text-lg">
             {activeTasks.length} {activeTasks.length === 1 ? 'task' : 'tasks'} remaining
           </p>
+          {user?.email && (
+            <p className="text-slate-500 dark:text-slate-500 text-sm mt-1">
+              {user.email}
+            </p>
+          )}
         </div>
 
         {/* New Task Input */}

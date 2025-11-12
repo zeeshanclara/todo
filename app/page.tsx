@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, KeyboardEvent } from 'react';
+import { useState, useRef, useEffect, useCallback, KeyboardEvent } from 'react';
 import { Reorder, useDragControls, motion, AnimatePresence } from 'framer-motion';
 import { db } from '@/lib/instant';
 import { id } from '@instantdb/react';
@@ -14,6 +14,7 @@ interface Task {
   createdAt?: number;
   updatedAt?: number;
   userId?: string;
+  [key: string]: unknown;
 }
 
 type Action =
@@ -44,7 +45,7 @@ export default function Home() {
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
   // Undo function
-  const undo = () => {
+  const undo = useCallback(() => {
     if (undoStack.length === 0) return;
 
     const lastAction = undoStack[undoStack.length - 1];
@@ -80,7 +81,7 @@ export default function Home() {
         );
         break;
     }
-  };
+  }, [undoStack]);
 
   // Listen for Cmd+Z - MUST be called before any conditional returns
   useEffect(() => {
@@ -93,7 +94,7 @@ export default function Home() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undoStack, tasks]);
+  }, [undo]);
 
   // Show auth screen if not authenticated
   if (authLoading) {
